@@ -1,0 +1,82 @@
+# Node.js
+node_modules/
+npm-debug.log
+yarn-error.log
+dist/
+dist-ssr/
+*.local
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+.venv
+venv/
+ENV/
+env/
+
+# Arduino
+build/
+*.build
+*.elf
+*.bin
+*.hex
+*.a
+*.o
+*.patch
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+Desktop.ini
+
+# IDEs and Editors
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+*.bak
+
+# Dataset / Data / Models
+*.zip
+*.tar.gz
+*.tar
+*.csv
+# If you don't want to exclude CSVs or models, comment these:
+# model.zip
+# data-collection/*.csv
+
+# Emscripten / WebAssembly
+*.wasm
+
+# Env Files
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
