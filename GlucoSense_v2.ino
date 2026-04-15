@@ -627,6 +627,7 @@ void loop() {
       Serial.println("─────────────────────────────────────");
       Serial.printf("  Glucose: %.1f mg/dL\n", latestReading.glucose);
       Serial.printf("  HR: %.0f bpm | SpO2: %.1f%%\n", latestReading.heartRate, latestReading.spO2);
+      Serial.printf("  Ratio: %.3f | Variability: %.1f\n", latestReading.ratio, latestReading.variability);
       Serial.println("─────────────────────────────────────");
 
       delay(3000); // cooldown
