@@ -1,22 +1,24 @@
 /*
  * ============================================================
- *  GlucoSense v4.0 — ESP32 + MAX30105 + ILI9341 Touch
+ *  GlucoSense v5.0 — Personalized Calibration + SVR Model
  * ============================================================
  *  Features:
  *    - SVR Glucose Model (GlucoseModel.h)
+ *    - User profile & personal bias calibration
+ *    - Robustness filters (HR smoothing, feature range checks)
  *    - 2.8" TFT UI (Home, History, Settings)
- *    - WiFi + WebSocket dashboard
+ *    - WiFi + WebSocket dashboard (handles setContext)
  *    - Heart rate + SpO2 estimation
  *
  *  MEDICAL DISCLAIMER: NOT a medical device.
  *
- *  Libraries:
- *    - SparkFun MAX3010x
- *    - TFT_eSPI (by Bodmer)
- *    - ArduinoJson (v7+)
- *    - WebSockets (by Markus Sattler)
- *
- *  Wiring: See comments above.
+ *  Serial Commands (115200 baud):
+ *    - set age <value>        : set user age
+ *    - set bmi <value>        : set user BMI
+ *    - set gender <0/1>       : 0 = female, 1 = male
+ *    - calibrate <ref_value>  : calibrate with reference glucose
+ *    - status                 : show current settings
+ *    - model basic/demo       : switch between basic and demographic model
  * ============================================================
  */
 
@@ -28,7 +30,7 @@
 #include <ArduinoJson.h>
 #include "MAX30105.h"
 #include <TFT_eSPI.h>
-#include "GlucoseModel.h"   // SVR prediction
+#include "GlucoseModel.h"
 
 // ─── WiFi ──────────────────────────────────────────
 const char* WIFI_SSID     = "iphone";
@@ -42,8 +44,8 @@ TFT_eSPI tft = TFT_eSPI();
 WebServer httpServer(80);
 WebSocketsServer wsServer(81);
 
-// ─── Touch Calibration (adjust if needed) ──────────
-uint16_t touchCalData[5] = { 275, 3620, 264, 3532, 1 };  // Portrait calibration; will be remapped for landscape
+// ─── Touch Calibration ─────────────────────────────
+uint16_t touchCalData[5] = { 275, 3620, 264, 3532, 1 };
 
 // ─── Sensor Config ─────────────────────────────────
 const int NUM_SAMPLES = 200;
@@ -57,18 +59,18 @@ uint32_t redBuffer[NUM_SAMPLES];
 #define SCR_H 240
 
 // Colors (RGB565) - Cyber Midnight Theme
-#define BG_COLOR       0x0000  // Pure Black background
-#define CARD_COLOR     0x0825  // Deep Midnight Blue for cards
-#define CARD_BORDER    0x18C6  // Glowing blue card borders
-#define TEXT_PRIMARY   0xFFFF  // Pure White for main text
-#define TEXT_SECONDARY 0x8410  // Steel Gray for labels
-#define CYAN           0x07FF  // Bright Cyan for accents
-#define GREEN          0x07E0  // Neon Green for normal readings
-#define ORANGE         0xFD20  // Warning Orange
-#define RED            0xF800  // Alert Red
-#define PURPLE         0xB01F  // Bright Purple for R-Ratio
-#define YELLOW         0xFFE0  // Yellow
-#define BLUE           0x03FF  // Bright Blue for SpO2
+#define BG_COLOR       0x0000
+#define CARD_COLOR     0x0825
+#define CARD_BORDER    0x18C6
+#define TEXT_PRIMARY   0xFFFF
+#define TEXT_SECONDARY 0x8410
+#define CYAN           0x07FF
+#define GREEN          0x07E0
+#define ORANGE         0xFD20
+#define RED            0xF800
+#define PURPLE         0xB01F
+#define YELLOW         0xFFE0
+#define BLUE           0x03FF
 
 // ─── State ─────────────────────────────────────────
 struct Reading {
@@ -94,7 +96,21 @@ Page currentPage = PAGE_HOME;
 bool needsRedraw = true;
 unsigned long lastTouchTime = 0;
 
-// ─── Forward declarations ──────────────────────────
+// ─── User Profile & Calibration ────────────────────
+float userAge      = 30.0;
+float userBMI      = 24.0;
+float userGender   = 1.0;
+bool  isCalibrated = false;
+float personalBias = 0.0;
+
+enum ModelType { MODEL_BASIC, MODEL_DEMOGRAPHIC };
+ModelType currentModel = MODEL_BASIC;
+
+// Heart rate smoothing
+float smoothedHR = 0;
+#define HR_ALPHA 0.3
+
+// ─── Forward Declarations ──────────────────────────
 void collectSamples();
 void processAndPredict();
 void broadcastReading();
@@ -108,6 +124,8 @@ void drawSettingsPage();
 void drawNavBar();
 void drawGauge(int cx, int cy, int r, float value);
 void handleTouch();
+void handleSerialCommands();
+void calibrateWithReference(float refGlucose);
 
 // ════════════════════════════════════════════════════
 //  DISPLAY DRAWING FUNCTIONS
@@ -145,7 +163,6 @@ void drawNavBar() {
 }
 
 void drawGauge(int cx, int cy, int radius, float value) {
-  // Background arc
   for (int a = -120; a <= 120; a += 2) {
     float rad = a * PI / 180.0;
     int x = cx + (radius) * cos(rad);
@@ -154,7 +171,6 @@ void drawGauge(int cx, int cy, int radius, float value) {
     tft.drawPixel(cx + (radius - 1) * cos(rad), cy + (radius - 1) * sin(rad), CARD_BORDER);
   }
 
-  // Colored arc segments
   for (int a = -120; a <= 120; a++) {
     float rad = a * PI / 180.0;
     uint16_t col;
@@ -170,7 +186,6 @@ void drawGauge(int cx, int cy, int radius, float value) {
     tft.drawLine(x1, y1, x2, y2, col);
   }
 
-  // Needle
   if (value > 0) {
     float clamped = constrain(value, 40, 300);
     float angle = ((clamped - 40.0) / 260.0) * 240.0 - 120.0;
@@ -227,7 +242,6 @@ void drawHomePage() {
 
   int rx = 170, ry = 28, rw = 142, rh = 44;
 
-  // Heart Rate
   drawRoundRect(rx, ry, rw, rh, CARD_COLOR, CARD_BORDER);
   tft.setTextFont(1);
   tft.setTextDatum(TL_DATUM);
@@ -244,7 +258,6 @@ void drawHomePage() {
     tft.drawString("---", rx + 8, ry + 16);
   }
 
-  // SpO2
   ry += rh + 6;
   drawRoundRect(rx, ry, rw, rh, CARD_COLOR, CARD_BORDER);
   tft.setTextFont(1);
@@ -262,7 +275,6 @@ void drawHomePage() {
     tft.drawString("---", rx + 8, ry + 16);
   }
 
-  // Ratio
   ry += rh + 6;
   drawRoundRect(rx, ry, rw, rh, CARD_COLOR, CARD_BORDER);
   tft.setTextFont(1);
@@ -275,6 +287,13 @@ void drawHomePage() {
     tft.drawString(String(latestReading.ratio, 3), rx + 8, ry + 16);
   } else {
     tft.drawString("---", rx + 8, ry + 16);
+  }
+
+  if (isCalibrated) {
+    tft.setTextDatum(TL_DATUM);
+    tft.setTextFont(1);
+    tft.setTextColor(GREEN, BG_COLOR);
+    tft.drawString("CAL", 5, SCR_H - 52);
   }
 
   tft.setTextDatum(MC_DATUM);
@@ -416,6 +435,20 @@ void drawSettingsPage() {
   drawRoundRect(8, y, SCR_W - 16, 55, CARD_COLOR, CARD_BORDER);
   tft.setTextFont(1);
   tft.setTextColor(TEXT_SECONDARY, CARD_COLOR);
+  tft.drawString("CALIBRATION", 16, y + 4);
+  tft.setTextColor(TEXT_PRIMARY, CARD_COLOR);
+  tft.drawString("Status: " + String(isCalibrated ? "Calibrated" : "Not calibrated"), 16, y + 16);
+  if (isCalibrated) {
+    tft.drawString("Bias: " + String(personalBias, 1) + " mg/dL", 16, y + 28);
+  } else {
+    tft.drawString("Send 'calibrate <ref>' via Serial", 16, y + 28);
+  }
+  tft.drawString("Age: " + String(userAge,0) + "  BMI: " + String(userBMI,1) + "  Sex: " + (userGender>0.5?"M":"F"), 16, y + 40);
+
+  y += 63;
+  drawRoundRect(8, y, SCR_W - 16, 55, CARD_COLOR, CARD_BORDER);
+  tft.setTextFont(1);
+  tft.setTextColor(TEXT_SECONDARY, CARD_COLOR);
   tft.drawString("DEVICE INFO", 16, y + 4);
   tft.setTextColor(TEXT_PRIMARY, CARD_COLOR);
   tft.drawString("Sensor: MAX30105", 16, y + 16);
@@ -449,15 +482,12 @@ void handleTouch() {
   uint16_t x = 0, y = 0;
   if (!tft.getTouch(&x, &y)) return;
 
-  // Debounce
   if (millis() - lastTouchTime < 300) return;
   lastTouchTime = millis();
 
-  // Map to landscape (rotation 1)
   int tx = map(x, touchCalData[0], touchCalData[1], 0, SCR_W);
   int ty = map(y, touchCalData[2], touchCalData[3], 0, SCR_H);
 
-  // Nav bar
   if (ty > SCR_H - 36) {
     Page newPage;
     if (tx < SCR_W / 3) newPage = PAGE_HOME;
@@ -477,14 +507,14 @@ void handleTouch() {
 void setup() {
   Serial.begin(115200);
   Serial.println("\n========================================");
-  Serial.println("  GlucoSense v4.0 — SVR Model + Touch");
+  Serial.println("  GlucoSense v5.0 — Personalized SVR");
   Serial.println("========================================\n");
 
   // Display
   tft.init();
   tft.invertDisplay(true);
-  tft.setRotation(1);        // Landscape
-  tft.setTouch(touchCalData); // Apply calibration
+  tft.setRotation(1);
+  tft.setTouch(touchCalData);
   tft.fillScreen(BG_COLOR);
   tft.setTextColor(CYAN, BG_COLOR);
   tft.setTextDatum(MC_DATUM);
@@ -547,22 +577,29 @@ void setup() {
 
   // HTTP + WebSocket
   httpServer.on("/", HTTP_GET, []() {
-    httpServer.send(200, "text/plain", "GlucoSense v4.0 API\n  GET /api/status\n  GET /api/reading\n  WS ws://" + ipAddress + ":81\n");
+    httpServer.send(200, "text/plain", "GlucoSense v5.0 API\n  GET /api/status\n  GET /api/reading\n  WS ws://" + ipAddress + ":81\n");
   });
   httpServer.on("/api/status", HTTP_GET, []() {
     JsonDocument doc;
-    doc["device"] = deviceID; doc["sensor"] = "MAX30105"; doc["model"] = "SVR";
-    doc["display"] = "ILI9341"; doc["touch"] = true;
-    doc["uptime"] = millis() / 1000; doc["ip"] = ipAddress;
+    doc["device"] = deviceID;
+    doc["sensor"] = "MAX30105";
+    doc["model"] = (currentModel == MODEL_BASIC) ? "Basic SVR" : "Demographic SVR";
+    doc["calibrated"] = isCalibrated;
+    doc["bias"] = personalBias;
+    doc["uptime"] = millis() / 1000;
+    doc["ip"] = ipAddress;
     String json; serializeJson(doc, json);
     httpServer.sendHeader("Access-Control-Allow-Origin", "*");
     httpServer.send(200, "application/json", json);
   });
   httpServer.on("/api/reading", HTTP_GET, []() {
     JsonDocument doc;
-    doc["glucose"] = latestReading.glucose; doc["heartRate"] = latestReading.heartRate;
-    doc["spO2"] = latestReading.spO2; doc["ratio"] = latestReading.ratio;
-    doc["finger"] = latestReading.fingerDetected; doc["timestamp"] = latestReading.timestamp;
+    doc["glucose"] = latestReading.glucose;
+    doc["heartRate"] = latestReading.heartRate;
+    doc["spO2"] = latestReading.spO2;
+    doc["ratio"] = latestReading.ratio;
+    doc["finger"] = latestReading.fingerDetected;
+    doc["timestamp"] = latestReading.timestamp;
     String json; serializeJson(doc, json);
     httpServer.sendHeader("Access-Control-Allow-Origin", "*");
     httpServer.send(200, "application/json", json);
@@ -572,11 +609,27 @@ void setup() {
   wsServer.onEvent([](uint8_t num, WStype_t type, uint8_t* payload, size_t length) {
     if (type == WStype_CONNECTED) Serial.printf("[WS] Client #%u connected\n", num);
     else if (type == WStype_DISCONNECTED) Serial.printf("[WS] Client #%u disconnected\n", num);
+    else if (type == WStype_TEXT) {
+      JsonDocument doc;
+      DeserializationError err = deserializeJson(doc, payload);
+      if (!err) {
+        const char* msgType = doc["type"];
+        if (strcmp(msgType, "setContext") == 0) {
+          if (doc.containsKey("age")) userAge = doc["age"];
+          if (doc.containsKey("gender")) userGender = doc["gender"];
+          if (doc.containsKey("bmi")) userBMI = doc["bmi"];
+          Serial.printf("[WS] Received context: Age=%.0f, Gender=%.0f, BMI=%.1f\n", userAge, userGender, userBMI);
+          currentModel = MODEL_DEMOGRAPHIC;
+          needsRedraw = true;
+        }
+      }
+    }
   });
   Serial.println("[HTTP] Server on port 80");
   Serial.println("[WS]   Server on port 81");
 
-  Serial.println("\n>> System ready. Touch screen to navigate.\n");
+  Serial.println("\n>> System ready. Touch screen to navigate.");
+  Serial.println(">> Serial commands: set age/bmi/gender, calibrate <ref>, status, model basic/demo\n");
   delay(1500);
   needsRedraw = true;
 }
@@ -588,6 +641,7 @@ void loop() {
   httpServer.handleClient();
   wsServer.loop();
   handleTouch();
+  handleSerialCommands();
 
   if (needsRedraw) {
     needsRedraw = false;
@@ -615,22 +669,33 @@ void loop() {
 
       collectSamples();
       processAndPredict();
-      broadcastReading();
 
-      history[histIdx] = latestReading;
-      histIdx = (histIdx + 1) % 10;
-      if (histCount < 10) histCount++;
+      if (latestReading.fingerDetected) {
+        broadcastReading();
+        history[histIdx] = latestReading;
+        histIdx = (histIdx + 1) % 10;
+        if (histCount < 10) histCount++;
+
+        Serial.println("─────────────────────────────────────");
+        Serial.printf("  Glucose: %.1f mg/dL\n", latestReading.glucose);
+        Serial.printf("  HR: %.0f bpm | SpO2: %.1f%%\n", latestReading.heartRate, latestReading.spO2);
+        Serial.printf("  Ratio: %.3f | Variability: %.1f\n", latestReading.ratio, latestReading.variability);
+        if (isCalibrated) Serial.printf("  (Calibrated, bias = %.1f)\n", personalBias);
+        Serial.println("─────────────────────────────────────");
+      } else {
+        if (currentPage == PAGE_HOME) {
+          tft.setTextDatum(MC_DATUM);
+          tft.setTextFont(2);
+          tft.fillRect(0, SCR_H - 56, SCR_W, 18, BG_COLOR);
+          tft.setTextColor(ORANGE, BG_COLOR);
+          tft.drawString("Unstable – retry", SCR_W / 2, SCR_H - 52);
+        }
+        delay(2000);
+      }
 
       isScanning = false;
       needsRedraw = true;
-
-      Serial.println("─────────────────────────────────────");
-      Serial.printf("  Glucose: %.1f mg/dL\n", latestReading.glucose);
-      Serial.printf("  HR: %.0f bpm | SpO2: %.1f%%\n", latestReading.heartRate, latestReading.spO2);
-      Serial.printf("  Ratio: %.3f | Variability: %.1f\n", latestReading.ratio, latestReading.variability);
-      Serial.println("─────────────────────────────────────");
-
-      delay(3000); // cooldown
+      delay(3000);
     }
   } else {
     if (isScanning) {
@@ -686,14 +751,48 @@ void processAndPredict() {
 
   float ratio = (redAC / redDC) / (irAC / irDC);
   float variability = irAC;
+  float hr = estimateHeartRate();
 
-  // Use polynomial SVR model (ratio + variability only)
-  float glucose = predictGlucoseSVR(ratio, variability);
+  // Feature validation
+  bool featuresValid = true;
+  if (ratio < 0.3 || ratio > 2.5) {
+    Serial.printf("WARN: Ratio out of range (%.3f) – discarding\n", ratio);
+    featuresValid = false;
+  }
+  if (variability < 2000 || variability > 200000) {
+    Serial.printf("WARN: Variability out of range (%.0f) – discarding\n", variability);
+    featuresValid = false;
+  }
 
-  latestReading.glucose = glucose;
+  if (!featuresValid) {
+    latestReading.fingerDetected = false;
+    return;
+  }
+
+  float rawGlucose;
+  #ifdef DEMOGRAPHIC_MODEL_AVAILABLE
+  if (currentModel == MODEL_DEMOGRAPHIC) {
+    rawGlucose = predictGlucoseSVR(ratio, variability, hr, userAge, userBMI, userGender);
+  } else {
+    rawGlucose = predictGlucoseSVR(ratio, variability);
+  }
+  #else
+  rawGlucose = predictGlucoseSVR(ratio, variability);
+  #endif
+
+  if (isCalibrated) {
+    latestReading.glucose = rawGlucose + personalBias;
+  } else {
+    latestReading.glucose = rawGlucose;
+  }
+
+  // Clamp to plausible prototype range
+  if (latestReading.glucose < 50.0) latestReading.glucose = 50.0;
+  if (latestReading.glucose > 300.0) latestReading.glucose = 300.0;
+
   latestReading.ratio = ratio;
   latestReading.variability = variability;
-  latestReading.heartRate = estimateHeartRate();
+  latestReading.heartRate = hr;
   latestReading.spO2 = estimateSpO2(ratio);
   latestReading.fingerDetected = true;
   latestReading.timestamp = millis();
@@ -701,9 +800,12 @@ void processAndPredict() {
 
 void broadcastReading() {
   JsonDocument doc;
-  doc["type"] = "reading"; doc["glucose"] = latestReading.glucose;
-  doc["heartRate"] = latestReading.heartRate; doc["spO2"] = latestReading.spO2;
-  doc["ratio"] = latestReading.ratio; doc["variability"] = latestReading.variability;
+  doc["type"] = "reading";
+  doc["glucose"] = latestReading.glucose;
+  doc["heartRate"] = latestReading.heartRate;
+  doc["spO2"] = latestReading.spO2;
+  doc["ratio"] = latestReading.ratio;
+  doc["variability"] = latestReading.variability;
   doc["timestamp"] = latestReading.timestamp;
   String json; serializeJson(doc, json);
   wsServer.broadcastTXT(json);
@@ -711,7 +813,9 @@ void broadcastReading() {
 
 void broadcastEvent(const char* evt, const char* msg) {
   JsonDocument doc;
-  doc["type"] = "event"; doc["event"] = evt; doc["message"] = msg;
+  doc["type"] = "event";
+  doc["event"] = evt;
+  doc["message"] = msg;
   String json; serializeJson(doc, json);
   wsServer.broadcastTXT(json);
 }
@@ -721,15 +825,32 @@ bool isFingerPresent() {
 }
 
 float estimateHeartRate() {
-  int peaks = 0; float threshold = 0;
+  int peaks = 0;
+  float threshold = 0;
   for (int i = 0; i < NUM_SAMPLES; i++) threshold += irBuffer[i];
   threshold /= NUM_SAMPLES;
+
   bool above = false;
   for (int i = 1; i < NUM_SAMPLES; i++) {
-    if (irBuffer[i] > threshold && !above) { peaks++; above = true; }
+    if (irBuffer[i] > threshold && !above) {
+      peaks++;
+      above = true;
+    }
     if (irBuffer[i] < threshold) above = false;
   }
-  return (peaks / (NUM_SAMPLES / (float)SAMPLE_RATE)) * 60.0;
+
+  float rawHR = (peaks / (NUM_SAMPLES / (float)SAMPLE_RATE)) * 60.0;
+
+  if (rawHR < 40) rawHR = 40;
+  if (rawHR > 180) rawHR = 180;
+
+  if (smoothedHR == 0) {
+    smoothedHR = rawHR;
+  } else {
+    smoothedHR = HR_ALPHA * rawHR + (1 - HR_ALPHA) * smoothedHR;
+  }
+
+  return smoothedHR;
 }
 
 float estimateSpO2(float ratio) {
@@ -737,4 +858,63 @@ float estimateSpO2(float ratio) {
   if (spo2 > 100) spo2 = 100;
   if (spo2 < 70) spo2 = 70;
   return spo2;
+}
+
+void handleSerialCommands() {
+  if (Serial.available()) {
+    String cmd = Serial.readStringUntil('\n');
+    cmd.trim();
+    if (cmd.length() == 0) return;
+
+    if (cmd.startsWith("set age ")) {
+      userAge = cmd.substring(8).toFloat();
+      Serial.printf("User age set to %.0f\n", userAge);
+      needsRedraw = true;
+    }
+    else if (cmd.startsWith("set bmi ")) {
+      userBMI = cmd.substring(8).toFloat();
+      Serial.printf("User BMI set to %.1f\n", userBMI);
+      needsRedraw = true;
+    }
+    else if (cmd.startsWith("set gender ")) {
+      userGender = cmd.substring(11).toFloat();
+      Serial.printf("User gender set to %s\n", (userGender > 0.5) ? "Male" : "Female");
+      needsRedraw = true;
+    }
+    else if (cmd.startsWith("calibrate ")) {
+      float ref = cmd.substring(10).toFloat();
+      calibrateWithReference(ref);
+    }
+    else if (cmd == "status") {
+      Serial.println("--- GlucoSense Status ---");
+      Serial.printf("Model: %s\n", (currentModel == MODEL_BASIC) ? "Basic" : "Demographic");
+      Serial.printf("Age: %.0f  BMI: %.1f  Gender: %s\n", userAge, userBMI, (userGender>0.5?"M":"F"));
+      Serial.printf("Calibrated: %s\n", isCalibrated ? "Yes" : "No");
+      if (isCalibrated) Serial.printf("Bias: %.1f mg/dL\n", personalBias);
+      Serial.printf("Last Glucose: %.1f mg/dL\n", latestReading.glucose);
+      Serial.printf("WiFi IP: %s\n", ipAddress.c_str());
+    }
+    else if (cmd == "model basic") {
+      currentModel = MODEL_BASIC;
+      Serial.println("Switched to basic model (ratio + variability)");
+    }
+    else if (cmd == "model demo") {
+      currentModel = MODEL_DEMOGRAPHIC;
+      Serial.println("Switched to demographic model (requires 6-parameter predict function)");
+    }
+    else {
+      Serial.println("Unknown command. Available: set age/bmi/gender, calibrate <ref>, status, model basic/demo");
+    }
+  }
+}
+
+void calibrateWithReference(float refGlucose) {
+  if (latestReading.glucose > 0) {
+    personalBias = refGlucose - latestReading.glucose;
+    isCalibrated = true;
+    Serial.printf("Calibration complete. Bias = %.1f mg/dL\n", personalBias);
+    needsRedraw = true;
+  } else {
+    Serial.println("No recent reading to calibrate against. Please take a reading first.");
+  }
 }
