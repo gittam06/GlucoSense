@@ -85,7 +85,7 @@ function Gauge({ value, size }) {
 
 function Card({ label, value, unit, icon, color, hist }) {
   return (
-    <div style={{ background: "#0f172a", border: "1px solid #1e293b", borderRadius: 8, padding: 14, display: "flex", flexDirection: "column", position: "relative", overflow: "hidden" }}>
+    <div className="data-card" style={{ background: "#0f172a", border: "1px solid #1e293b", borderRadius: 8, padding: 14, display: "flex", flexDirection: "column", position: "relative", overflow: "hidden" }}>
       <div style={{ position: "absolute", top: -10, right: -10, width: 40, height: 40, borderRadius: "50%", background: color, opacity: 0.1 }} />
       <div style={{ display: "flex", alignItems: "center", gap: 5 }}>
         <span style={{ fontSize: 13 }}>{icon}</span>
@@ -100,35 +100,98 @@ function Card({ label, value, unit, icon, color, hist }) {
   );
 }
 
-function Chart({ readings, height }) {
+function Chart({ readings, height = 300 }) {
   if (readings.length < 2) return (
-    <div style={{ width: "100%", height, display: "flex", alignItems: "center", justifyContent: "center", color: "#334155", fontSize: 12, fontFamily: "'JetBrains Mono',monospace", border: "1px dashed #1e293b", borderRadius: 8 }}>Waiting for readings...</div>
+    <div style={{ width: "100%", height, display: "flex", alignItems: "center", justifyContent: "center", color: "#334155", fontSize: 13, fontFamily: "'JetBrains Mono',monospace", border: "1px dashed #1e293b", borderRadius: 8 }}>Insufficient reading history to plot trajectory...</div>
   );
-  const W = 600, P = { t: 14, r: 14, b: 24, l: 40 };
-  const w = W - P.l - P.r, h = height - P.t - P.b;
-  const vals = readings.map(r => r.glucose); const lo = Math.max(40, Math.min(...vals) - 10), hi = Math.max(...vals) + 10;
-  const xS = i => P.l + (i / (readings.length - 1)) * w; const yS = v => P.t + h - ((v - lo) / (hi - lo)) * h;
-  const ln = readings.map((r, i) => `${i ? "L" : "M"} ${xS(i)} ${yS(r.glucose)}`).join(" ");
-  const ar = ln + ` L ${xS(readings.length - 1)} ${P.t + h} L ${xS(0)} ${P.t + h} Z`;
+  
+  const axisW = 40;
+  const P = { t: 40, r: 40, b: 40, l: 40 };
+  const targetW = Math.max(500, readings.length * 85); 
+  const w = targetW - P.l - P.r, h = height - P.t - P.b;
+  
+  const vals = readings.map(r => r.glucose);
+  const lo = Math.max(20, Math.min(...vals) - 30);
+  const hi = Math.max(200, ...vals) + 30;
+  
+  const xS = i => P.l + (i / (readings.length - 1)) * w; 
+  const yS = v => P.t + h - ((v - lo) / (hi - lo)) * h;
   const zy = v => Math.max(P.t, Math.min(P.t + h, yS(v)));
+
+  const points = readings.map((r, i) => [xS(i), yS(r.glucose)]);
+  let ln = `M ${points[0][0]} ${points[0][1]}`;
+  for (let i = 1; i < points.length; i++) {
+     const [x0, y0] = points[i-1]; const [x1, y1] = points[i];
+     const cp1x = x0 + (x1 - x0) / 2.5, cp2x = x1 - (x1 - x0) / 2.5;
+     ln += ` C ${cp1x} ${y0}, ${cp2x} ${y1}, ${x1} ${y1}`;
+  }
+  const ar = ln + ` L ${points[points.length - 1][0]} ${P.t + h} L ${points[0][0]} ${P.t + h} Z`;
+
   return (
-    <svg width="100%" viewBox={`0 0 ${W} ${height}`} style={{ display: "block" }}>
-      <rect x={P.l} y={zy(300)} width={w} height={zy(200) - zy(300)} fill="#ef4444" opacity="0.04" />
-      <rect x={P.l} y={zy(200)} width={w} height={zy(140) - zy(200)} fill="#f97316" opacity="0.04" />
-      <rect x={P.l} y={zy(140)} width={w} height={zy(70) - zy(140)} fill="#10b981" opacity="0.05" />
-      <rect x={P.l} y={zy(70)} width={w} height={zy(40) - zy(70)} fill="#f59e0b" opacity="0.04" />
-      {[70, 100, 140, 200].filter(v => v >= lo && v <= hi).map(v => (
-        <g key={v}><line x1={P.l} y1={yS(v)} x2={P.l + w} y2={yS(v)} stroke="#1e293b" strokeDasharray="3 3" />
-        <text x={P.l - 4} y={yS(v) + 3} textAnchor="end" fill="#475569" fontSize="9" fontFamily="'JetBrains Mono',monospace">{v}</text></g>
-      ))}
-      <defs><linearGradient id="ag" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor="#06b6d4" stopOpacity="0.2" /><stop offset="100%" stopColor="#06b6d4" stopOpacity="0" /></linearGradient></defs>
-      <path d={ar} fill="url(#ag)" />
-      <path d={ln} fill="none" stroke="#06b6d4" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
-      {readings.map((r, i) => <circle key={i} cx={xS(i)} cy={yS(r.glucose)} r="3" fill="#0f172a" stroke={glucoseZone(r.glucose).color} strokeWidth="1.5" />)}
-      {readings.filter((_, i) => i % Math.max(1, Math.floor(readings.length / 5)) === 0).map(r => (
-        <text key={readings.indexOf(r)} x={xS(readings.indexOf(r))} y={height - 3} textAnchor="middle" fill="#475569" fontSize="8" fontFamily="'JetBrains Mono',monospace">{fmt(r.timestamp)}</text>
-      ))}
-    </svg>
+    <div style={{ position: "relative", width: "100%", height, background: "#020617", borderRadius: 8, border: "1px solid #1e293b", overflow: "hidden" }}>
+       
+       {/* Layer 0: Background Zones & Complete Grid Lines */}
+       <div style={{ position: "absolute", top: 0, left: axisW, right: 0, height: "100%", pointerEvents: "none", zIndex: 0 }}>
+           <div style={{ position: "absolute", top: zy(300), height: Math.max(0, zy(200) - zy(300)), width: "100%", background: "#ef4444", opacity: 0.03 }} />
+           <div style={{ position: "absolute", top: zy(200), height: Math.max(0, zy(140) - zy(200)), width: "100%", background: "#f97316", opacity: 0.03 }} />
+           <div style={{ position: "absolute", top: zy(140), height: Math.max(0, zy(70) - zy(140)), width: "100%", background: "#10b981", opacity: 0.05 }} />
+           <div style={{ position: "absolute", top: zy(70), height: Math.max(0, zy(20) - zy(70)), width: "100%", background: "#f59e0b", opacity: 0.03 }} />
+           
+           {[70, 100, 140, 200, 250].filter(v => v >= lo && v <= hi).map(v => (
+               <div key={v} style={{ position: "absolute", top: yS(v), width: "100%", borderTop: "1px dashed #1e293b" }}></div>
+           ))}
+       </div>
+
+       {/* Layer 1: Left Stationary Y-Axis Scale */}
+       <div style={{ position: "absolute", top: 0, left: 0, width: axisW, height: "100%", background: "#0f172a", borderRight: "1px solid #1e293b", zIndex: 10 }}>
+           {[70, 100, 140, 200, 250].filter(v => v >= lo && v <= hi).map(v => (
+               <div key={v} style={{ position: "absolute", top: yS(v) - 6, width: axisW - 8, textAlign: "right", color: "#64748b", fontSize: 10, fontWeight: 600, fontFamily: "'JetBrains Mono',monospace" }}>{v}</div>
+           ))}
+       </div>
+
+       {/* Layer 2: Graph Data Canvas (Horizontally Scrollable) */}
+       <div className="custom-scroll" style={{ position: "absolute", top: 0, left: axisW, width: `calc(100% - ${axisW}px)`, height: "100%", overflowX: "auto", overflowY: "hidden", zIndex: 5 }}>
+         <svg width={targetW} height={height} viewBox={`0 0 ${targetW} ${height}`} style={{ display: "block" }}>
+            <defs>
+              <linearGradient id="ag" x1="0" y1="0" x2="0" y2="1">
+                <stop offset="0%" stopColor="#0ea5e9" stopOpacity="0.25" />
+                <stop offset="100%" stopColor="#0ea5e9" stopOpacity="0" />
+              </linearGradient>
+              <filter id="glow" x="-50%" y="-50%" width="200%" height="200%">
+                 <feGaussianBlur stdDeviation="3.5" result="blur" />
+                 <feComposite in="SourceGraphic" in2="blur" operator="over" />
+              </filter>
+            </defs>
+
+            <path d={ar} fill="url(#ag)" />
+            <path d={ln} fill="none" stroke="#0ea5e9" strokeWidth="4" strokeLinecap="round" strokeLinejoin="round" filter="url(#glow)" />
+            
+            {readings.map((r, i) => {
+               let z = glucoseZone(r.glucose);
+               let cx = points[i][0], cy = points[i][1];
+               return (
+                 <g key={i}>
+                    <line x1={cx} y1={cy} x2={cx} y2={P.t+h} stroke={z.color} strokeWidth="1" strokeDasharray="2 4" opacity="0.4" />
+                    <circle cx={cx} cy={cy} r="6" fill="#0f172a" stroke={z.color} strokeWidth="2.5" />
+                    
+                    <rect x={cx-16} y={cy-28} width="32" height="18" rx="4" fill="#0f172a" stroke="#1e293b" opacity="0.9" />
+                    <text x={cx} y={cy - 15} textAnchor="middle" fill="#f1f5f9" fontSize="11" fontWeight="700" fontFamily="'JetBrains Mono',monospace">
+                       {r.glucose.toFixed(0)}
+                    </text>
+                    
+                    {/* Render exact Date and Time separately to differentiate same-day scans */}
+                    <text x={cx} y={height - 20} textAnchor="middle" fill="#94a3b8" fontSize="9" fontWeight="600" fontFamily="'JetBrains Mono',monospace">
+                       {fmtDate(r.timestamp)}
+                    </text>
+                    <text x={cx} y={height - 8} textAnchor="middle" fill="#64748b" fontSize="9" fontFamily="'JetBrains Mono',monospace">
+                       {fmt(r.timestamp).slice(0, 5)}
+                    </text>
+                 </g>
+               )
+            })}
+         </svg>
+       </div>
+    </div>
   );
 }
 
@@ -328,6 +391,8 @@ export default function App() {
       <div className="sys-wrap">
       <style>{`@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&family=Outfit:wght@300;400;500;600;700&display=swap');
         @keyframes pulse { 0%,100%{opacity:1}50%{opacity:.4} }
+        @keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+        @keyframes scaleIn { from { opacity: 0; transform: scale(0.95); } to { opacity: 1; transform: scale(1); } }
         * { box-sizing: border-box; }
         ::-webkit-scrollbar { width: 8px; height: 8px; }
         ::-webkit-scrollbar-thumb { background: #334155; border-radius: 4px; }
@@ -338,7 +403,19 @@ export default function App() {
         .sys-wrap { display: flex; width: 100%; height: 100vh; background: #020617; color: #e2e8f0; font-family: 'Outfit', system-ui, sans-serif; overflow: hidden; }
         .sys-nav { width: 260px; background: #000; border-right: 1px solid #1e293b; display: flex; flex-direction: column; flex-shrink: 0; transition: 0.3s; }
         .sys-nav-links { flex: 1; display: flex; flex-direction: column; gap: 6px; padding: 0 10px; }
-        .sys-main { flex: 1; overflow-y: auto; padding: 30px; }
+        .sys-main { flex: 1; overflow-y: auto; padding: 30px; scroll-behavior: smooth; }
+        
+        .page-trans { animation: fadeIn 0.4s cubic-bezier(0.16, 1, 0.3, 1) forwards; }
+        .scale-trans { animation: scaleIn 0.3s cubic-bezier(0.16, 1, 0.3, 1) forwards; }
+        
+        button { transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1); }
+        button:hover { transform: translateY(-1px); filter: brightness(1.1); box-shadow: 0 4px 12px rgba(0,0,0,0.15); }
+        button:active { transform: translateY(0) scale(0.97); }
+        
+        .data-card { transition: all 0.3s cubic-bezier(0.16, 1, 0.3, 1); }
+        .data-card:hover { transform: translateY(-3px); box-shadow: 0 10px 25px rgba(0,0,0,0.4); border-color: #334155 !important; }
+        .pointer-card { cursor: pointer; }
+        
         .grid-split { display: grid; grid-template-columns: 1fr 280px; gap: 24px; }
         .grid-3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
         .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; }
@@ -400,7 +477,7 @@ export default function App() {
              
              {/* ══════ SCAN PAGE ══════ */}
              {page === "scan" && (
-                <div>
+                <div className="page-trans">
                    <h1 style={{ fontSize: 28, fontWeight: 700, marginBottom: 24, borderBottom: "1px solid #1e293b", paddingBottom: 16 }}>Live Sensor Dashboard</h1>
                    
                    {!activePat ? (
@@ -419,14 +496,37 @@ export default function App() {
                                   <Card label="R Ratio" value={latest.ratio} unit="" icon="📊" color="#8b5cf6" hist={liveReadings.map(r => r.ratio)} />
                               </div>
 
-                              <div style={crd}>
-                                  <div style={lbl}>Live Session Data Plot</div>
-                                  <Chart readings={liveReadings} height={250} />
+                              <div style={crd} className="data-card">
+                                  <div style={{ ...lbl, display: 'flex', justifyContent: 'space-between' }}>
+                                      <span>Recent Scans</span>
+                                      <span style={{ cursor: "pointer", color: "#06b6d4", textTransform: "none" }} onClick={() => setPage("history")}>View all history →</span>
+                                  </div>
+                                  {!savedReadings.length ? (
+                                      <div style={{ height: 250, display: "flex", alignItems: "center", justifyContent: "center", color: "#334155", fontSize: 13, border: "1px dashed #1e293b", borderRadius: 8 }}>No scans yet...</div>
+                                  ) : (
+                                      <div style={{ display: "flex", flexDirection: "column", gap: 10, height: 250, overflowY: "auto", paddingRight: 4 }}>
+                                          {[...savedReadings].reverse().slice(0, 4).map(r => {
+                                              const z = glucoseZone(r.glucose);
+                                              return (
+                                                  <div key={r.id} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "12px 16px", background: "#020617", borderRadius: 8, borderLeft: `3px solid ${z.color}` }}>
+                                                      <div>
+                                                          <div style={{ color: "#e2e8f0", fontSize: 13, fontWeight: 600 }}>{fmtDate(r.timestamp)} - {fmt(r.timestamp)}</div>
+                                                          <div style={{ color: "#64748b", fontSize: 11, marginTop: 4, fontStyle: "italic" }}>{r.notes ? `"${r.notes}"` : "No notes"}</div>
+                                                      </div>
+                                                      <div style={{ textAlign: "right" }}>
+                                                          <div style={{ color: z.color, fontSize: 22, fontWeight: 700, fontFamily: "'JetBrains Mono',monospace", lineHeight: 1 }}>{r.glucose.toFixed(0)}</div>
+                                                          <div style={{ color: z.color, fontSize: 9, fontWeight: 600, textTransform: "uppercase", marginTop: 4 }}>{z.label}</div>
+                                                      </div>
+                                                  </div>
+                                              )
+                                          })}
+                                      </div>
+                                  )}
                               </div>
                           </div>
 
                           {/* Action Block */}
-                          <div style={{ ...crd, textAlign: "center", display: "flex", flexDirection: "column", gap: 16 }}>
+                          <div className="data-card" style={{ ...crd, textAlign: "center", display: "flex", flexDirection: "column", gap: 16 }}>
                               <div style={lbl}>Glucose Prediction</div>
                               <Gauge value={pendingReading ? pendingReading.glucose : latest.glucose} size={200} />
                               <div style={{ fontSize: 10, color: "#64748b", fontFamily: "'JetBrains Mono',monospace", margin: "-10px 0 10px 0" }}>Update Loop: {ago(latest.timestamp)}</div>
@@ -436,7 +536,7 @@ export default function App() {
                                       <div style={{ fontSize: 12, color: "#38bdf8", animation: "pulse 1.5s infinite" }}>Collecting PPG Signal...</div>
                                   </div>
                               ) : (
-                                  <button onClick={startScan} style={{ ...btn(), padding: "16px", fontSize: 14 }}>Initialize Hardware Scan</button>
+                                  <button onClick={startScan} style={{ ...btn(), padding: "16px", fontSize: 14 }}>Start New Scan</button>
                               )}
                           </div>
                       </div>
@@ -446,13 +546,13 @@ export default function App() {
 
              {/* ══════ HISTORY / LEDGER PAGE ══════ */}
              {page === "history" && (
-                <div>
+                <div className="page-trans">
                    <h1 style={{ fontSize: 28, fontWeight: 700, marginBottom: 24, borderBottom: "1px solid #1e293b", paddingBottom: 16 }}>Database Logs</h1>
                    
                    <div className="hist-header">
                       <div style={{ display: "flex", gap: 8 }}>
-                          <button onClick={() => setHistView("list")} style={{ ...btnO(histView === "list" ? "#06b6d4" : "#334155") }}>List Array</button>
-                          <button onClick={() => setHistView("graph")} style={{ ...btnO(histView === "graph" ? "#06b6d4" : "#334155") }}>Graphic Plot</button>
+                          <button onClick={() => setHistView("list")} style={{ ...btnO(histView === "list" ? "#06b6d4" : "#334155") }}>List View</button>
+                          <button onClick={() => setHistView("graph")} style={{ ...btnO(histView === "graph" ? "#06b6d4" : "#334155") }}>Graph View</button>
                       </div>
                       
                       <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
@@ -468,18 +568,18 @@ export default function App() {
                    ) : (
                       <>
                          {histView === "graph" && (
-                             <div style={crd}>
-                                 <div style={lbl}>Timeline Trend Plot</div>
+                             <div style={crd} className="data-card page-trans">
+                                 <div style={lbl}>Glucose History Chart</div>
                                  <Chart readings={filtered} height={300} />
                              </div>
                          )}
 
                          {histView === "list" && (
-                             <div className="grid-3">
+                             <div className="grid-3 page-trans">
                                  {[...filtered].reverse().map(r => {
                                      const z = glucoseZone(r.glucose);
                                      return (
-                                         <div key={r.id} style={{ ...crd, display: "flex", flexDirection: "column", gap: 8 }}>
+                                         <div key={r.id} className="data-card" style={{ ...crd, display: "flex", flexDirection: "column", gap: 8 }}>
                                              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
                                                  <div style={{ fontSize: 24, fontWeight: 700, color: z.color, fontFamily: "'JetBrains Mono',monospace" }}>{r.glucose.toFixed(0)}</div>
                                                  <button onClick={() => delReading(r.id)} style={{ color: "#ef4444", background: "none", border: "none", cursor: "pointer", fontSize: 16 }}>×</button>
@@ -501,7 +601,7 @@ export default function App() {
 
              {/* ══════ HBA1C / INSIGHTS PAGE ══════ */}
              {page === "hba1c" && (
-                <div>
+                <div className="page-trans">
                    <h1 style={{ fontSize: 28, fontWeight: 700, marginBottom: 24, borderBottom: "1px solid #1e293b", paddingBottom: 16 }}>Data Insight Module</h1>
                    
                    {!activePat || !stats ? (
@@ -510,7 +610,7 @@ export default function App() {
                        <div className="grid-2">
                            
                            {/* A1C Block */}
-                           <div style={{ ...crd, textAlign: "center", padding: "40px 20px" }}>
+                           <div className="data-card" style={{ ...crd, textAlign: "center", padding: "40px 20px" }}>
                                <div style={lbl}>Computed eA1c</div>
                                <div style={{ fontSize: 64, fontWeight: 700, color: stats.a1cZ.color, fontFamily: "'JetBrains Mono',monospace", lineHeight: 1 }}>
                                    {stats.eA1c.toFixed(1)}<span style={{ fontSize: 24 }}>%</span>
@@ -521,13 +621,13 @@ export default function App() {
                            </div>
 
                            {/* Distribution Donut */}
-                           <div style={{ ...crd, display: "flex", flexDirection: "column", alignItems: "center", padding: "40px 20px" }}>
+                           <div className="data-card" style={{ ...crd, display: "flex", flexDirection: "column", alignItems: "center", padding: "40px 20px" }}>
                                <div style={lbl}>Distribution Ratio</div>
                                <TimeInRange readings={filtered} size={180} />
                            </div>
 
                            {/* Standard Deviation / Aggregates */}
-                           <div style={{ ...crd, gridColumn: "1 / -1" }} className="grid-4">
+                           <div className="data-card grid-4" style={{ ...crd, gridColumn: "1 / -1" }}>
                                <div>
                                    <div style={{ fontSize: 24, color: "#06b6d4", fontFamily: "'JetBrains Mono',monospace", fontWeight: 700 }}>{stats.avg.toFixed(0)}</div>
                                    <div style={{ fontSize: 10, color: "#64748b", marginTop: 4 }}>Mean Average (mg/dL)</div>
@@ -553,17 +653,17 @@ export default function App() {
 
              {/* ══════ SETTINGS PAGE ══════ */}
              {(page === "settings") && (
-                <div>
+                <div className="page-trans">
                    <h1 style={{ fontSize: 28, fontWeight: 700, marginBottom: 24, borderBottom: "1px solid #1e293b", paddingBottom: 16 }}>Settings & Profiles</h1>
                    
                    <div className="grid-2">
                        
                        {/* Patient DB Block */}
-                       <div style={{ ...crd, display: "flex", flexDirection: "column", gap: 16 }}>
+                       <div className="data-card" style={{ ...crd, display: "flex", flexDirection: "column", gap: 16 }}>
                            <div style={lbl}>Registered Users</div>
                            
                            {patients.map(p => (
-                               <div key={p.id} onClick={() => setActivePat(p.id)} style={{ padding: 16, background: activePat === p.id ? "#06b6d420" : "#020617", border: `1px solid ${activePat === p.id ? "#06b6d4" : "#1e293b"}`, borderRadius: 8, cursor: "pointer", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                               <div key={p.id} className="data-card pointer-card" onClick={() => setActivePat(p.id)} style={{ padding: 16, background: activePat === p.id ? "#06b6d420" : "#020617", border: `1px solid ${activePat === p.id ? "#06b6d4" : "#1e293b"}`, borderRadius: 8, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
                                    <div>
                                        <div style={{ fontSize: 16, fontWeight: 700, color: "#e2e8f0" }}>{p.name}</div>
                                        <div style={{ fontSize: 10, color: "#64748b", fontFamily: "'JetBrains Mono',monospace", marginTop: 4 }}>Age: {p.age} | BMI: {p.bmi}</div>
@@ -585,7 +685,7 @@ export default function App() {
 
                        {/* System Hardware Block */}
                        <div style={{ display: "flex", flexDirection: "column", gap: 24 }}>
-                           <div style={crd}>
+                           <div style={crd} className="data-card">
                                <div style={lbl}>Hardware Connection</div>
                                <div style={{ display: "flex", gap: 10, marginTop: 10 }}>
                                    <input type="text" value={wsUrl} onChange={e => setWsUrl(e.target.value)} placeholder="ws://" style={inp} />
@@ -597,7 +697,7 @@ export default function App() {
                                </div>
                            </div>
 
-                           <div style={crd}>
+                           <div style={crd} className="data-card">
                                <div style={lbl}>Data Backup</div>
                                <div style={{ display: "flex", flexDirection: "column", gap: 10, marginTop: 10 }}>
                                    <button onClick={async () => { const d = { patients: await dbAll("patients"), readings: await dbAll("readings") }; const b = new Blob([JSON.stringify(d, null, 2)], { type: "application/json" }); const a = document.createElement("a"); a.href = URL.createObjectURL(b); a.download = `backup_${toDS(Date.now())}.json`; a.click(); }} style={btnO("#8b5cf6")}>Download Backup (.JSON)</button>
@@ -615,8 +715,8 @@ export default function App() {
 
       {/* ══════ MODAL POPUP FOR SAVING READING ══════ */}
       {pendingReading && (
-        <div style={{ position: "fixed", top: 0, left: 0, width: "100%", height: "100%", background: "rgba(0,0,0,0.8)", zIndex: 100, display: "flex", alignItems: "center", justifyContent: "center", backdropFilter: "blur(4px)" }}>
-           <div style={{ background: "#0f172a", width: 420, maxWidth: "90%", padding: 24, borderRadius: 12, border: "1px solid #1e293b", boxShadow: "0 20px 40px rgba(0,0,0,0.5)", animation: "fadeIn .2s ease-out" }}>
+        <div style={{ position: "fixed", top: 0, left: 0, width: "100%", height: "100%", background: "rgba(0,0,0,0.8)", zIndex: 100, display: "flex", alignItems: "center", justifyContent: "center", backdropFilter: "blur(4px)", opacity: 0, animation: "fadeIn .2s ease-out forwards" }}>
+           <div className="scale-trans" style={{ background: "#0f172a", width: 420, maxWidth: "90%", padding: 24, borderRadius: 12, border: "1px solid #1e293b", boxShadow: "0 20px 40px rgba(0,0,0,0.5)" }}>
               <h3 style={{ margin: "0 0 20px 0", fontSize: 20, fontWeight: 700, color: "#e2e8f0" }}>Log Reading</h3>
               
               <div style={{ background: "#020617", padding: "30px", borderRadius: 8, display: "flex", alignItems: "baseline", justifyContent: "center", gap: 8, marginBottom: 24, border: "1px solid #10b98140", boxShadow: "inset 0 0 20px rgba(16,185,129,0.1)" }}>
