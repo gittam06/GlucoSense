@@ -33,8 +33,8 @@
 #include "GlucoseModel.h"
 
 // ─── WiFi ──────────────────────────────────────────
-const char* WIFI_SSID     = "iphone";
-const char* WIFI_PASSWORD = "Alon@123";
+const char* WIFI_SSID     = "Choti-Advance";
+const char* WIFI_PASSWORD = "luCifer@78381";
 const char* AP_SSID       = "GlucoSense-ESP32";
 const char* AP_PASSWORD   = "glucose123";
 
