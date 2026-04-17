@@ -1,3 +1,5 @@
+import { db } from './firebase';
+import { ref, onValue, update } from "firebase/database";
 import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 
 const MAX_HISTORY = 30;
@@ -268,10 +270,36 @@ export default function App() {
   const [scanning, setScanning] = useState(false);
   const [pendingReading, setPendingReading] = useState(null);
   
-  const [newName, setNewName] = useState(""); const [newAge, setNewAge] = useState("");
-  const [newGender, setNewGender] = useState("1"); const [newWeight, setNewWeight] = useState(""); const [newHeight, setNewHeight] = useState("");
+  const [newName, setNewName] = useState("");
   const [histView, setHistView] = useState("list");
   const [dateFrom, setDateFrom] = useState(""); const [dateTo, setDateTo] = useState("");
+
+  // --- FIREBASE CLOUD SYNC ---
+  useEffect(() => {
+    // Look at the 'readings' folder in our database
+    const readingsRef = ref(db, 'readings');
+    
+    // Listen for any changes or new data
+    const unsubscribe = onValue(readingsRef, (snapshot) => {
+      const data = snapshot.val();
+      if (data) {
+        // Firebase returns an object of objects. We need to convert it to an array.
+        const historyArray = Object.entries(data).map(([key, val]) => ({...val, id: key}));
+        
+        // Sort the array so the newest readings are at the top (based on timestamp)
+        historyArray.sort((a, b) => b.timestamp - a.timestamp);
+        
+        // Update the React state! (Adapted to match App.jsx state names)
+        setSavedReadings(historyArray);
+        
+        // Set the most recent reading as the main display
+        setLatest(historyArray[0]); 
+      }
+    });
+
+    // Cleanup the listener when the component unmounts
+    return () => unsubscribe();
+  }, []);
 
   useEffect(() => {
     (async () => {
@@ -286,6 +314,10 @@ export default function App() {
     if (!activePat) { setSavedReadings([]); return; }
     localStorage.setItem("gs_ap", activePat);
     (async () => { const r = await dbIdx("readings", "patientId", activePat); setSavedReadings(r.sort((a, b) => a.timestamp - b.timestamp)); })();
+    
+    // Clear live scan state when switching patients
+    setPendingReading(null); setScanning(false); setEv(""); setLiveReadings([]);
+    setLatest({ glucose: 0, heartRate: 0, spO2: 0, ratio: 0, variability: 0, timestamp: 0 });
   }, [activePat]);
 
   const connectRef = useRef(null);
@@ -304,8 +336,8 @@ export default function App() {
         try { 
             const d = JSON.parse(e.data); 
             if (d.type === "reading") { 
-                d.timestamp = Date.now(); setLatest(d); setLiveReadings(p => [...p.slice(-MAX_HISTORY + 1), d]); setEv(""); 
-                setPendingReading(d); 
+                setLiveReadings(p => [...p.slice(-MAX_HISTORY + 1), d]); setEv(""); 
+                setPendingReading(d);
                 setScanning(false); 
             } else if (d.type === "event") setEv(d.message); 
         } catch {} 
@@ -327,11 +359,9 @@ export default function App() {
 
   const addPatient = async () => {
     if (!newName.trim()) return;
-    const h = parseFloat(newHeight); const w = parseFloat(newWeight); let bmi = 0;
-    if (h > 0 && w > 0) bmi = +(w / ((h / 100) ** 2)).toFixed(1);
-    const p = { id: uid(), name: newName.trim(), age: newAge || "", gender: newGender, weight: newWeight, height: newHeight, bmi, createdAt: Date.now() };
+    const p = { id: uid(), name: newName.trim(), createdAt: Date.now() };
     await dbPut("patients", p); setPatients(prev => [...prev, p]); setActivePat(p.id);
-    setNewName(""); setNewAge(""); setNewGender("1"); setNewWeight(""); setNewHeight("");
+    setNewName("");
   };
 
   const deletePat = async (id) => {
@@ -345,20 +375,41 @@ export default function App() {
   const startScan = () => {
     if (!activePat) return alert("Select patient");
     if (st !== "connected") return alert("Connect hardware first");
-    const p = patients.find(x => x.id === activePat);
-    if (p && ws.current) {
-        ws.current.send(JSON.stringify({ type: "setContext", age: parseInt(p.age) || 40, gender: parseInt(p.gender) || 1, bmi: parseFloat(p.bmi) || 24.5, weight: parseFloat(p.weight) || 70, height: parseFloat(p.height) || 170 }));
-    }
-    setScanning(true); setPendingReading(null);
+
+    if (ws.current) ws.current.send(JSON.stringify({ type: "startScan" }));
+
+    setScanning(true); setPendingReading(null); setEv(""); setLiveReadings([]);
+    setLatest({ glucose: 0, heartRate: 0, spO2: 0, ratio: 0, variability: 0, timestamp: 0 });
   };
 
-  const saveReading = async () => {
-    if (!pendingReading || !activePat) return;
-    const entry = { patientId: activePat, timestamp: Date.now(), glucose: pendingReading.glucose, heartRate: pendingReading.heartRate || 0, spO2: pendingReading.spO2 || 0, ratio: pendingReading.ratio || 0, variability: pendingReading.variability || 0, notes: notes.trim() };
-    const id = await dbPut("readings", entry); entry.id = id;
-    setSavedReadings(prev => [...prev, entry].sort((a, b) => a.timestamp - b.timestamp));
-    setPendingReading(null); setNotes("");
+  const saveNotes = async () => {
+    try {
+        if (!savedReadings || savedReadings.length === 0) {
+            alert("Waiting for cloud sync... please try again in 1 second.");
+            return;
+        }
+        
+        let matchingRecord = savedReadings[0];
+        if (pendingReading && Math.abs(pendingReading.glucose - matchingRecord.glucose) > 0.1) {
+             matchingRecord = savedReadings.find(r => Math.abs(r.glucose - pendingReading.glucose) < 0.1) || savedReadings[0];
+        }
+
+        if (matchingRecord && matchingRecord.id) {
+           const recordRef = ref(db, `readings/${matchingRecord.id}`);
+           await update(recordRef, { 
+               patientId: activePat || "unknown", 
+               notes: notes.trim() 
+           });
+           setPendingReading(null);
+           setNotes("");
+        } else {
+           alert("Error: Cloud ID missing. Is Firebase connected?");
+        }
+    } catch(e) {
+        alert("Cloud Sync Error: " + e.message);
+    }
   };
+
   const delReading = async (id) => { await dbDel("readings", id); setSavedReadings(prev => prev.filter(r => r.id !== id)); };
 
   const filtered = useMemo(() => {
@@ -602,7 +653,10 @@ export default function App() {
              {/* ══════ HBA1C / INSIGHTS PAGE ══════ */}
              {page === "hba1c" && (
                 <div className="page-trans">
-                   <h1 style={{ fontSize: 28, fontWeight: 700, marginBottom: 24, borderBottom: "1px solid #1e293b", paddingBottom: 16 }}>Data Insight Module</h1>
+                   <h1 style={{ fontSize: 28, fontWeight: 700, marginBottom: 16 }}>Data Insight Module</h1>
+                   <div style={{ fontSize: 13, color: "#94a3b8", marginBottom: 24, paddingBottom: 16, borderBottom: "1px solid #1e293b", lineHeight: 1.5 }}>
+                     <strong>📝 Note:</strong> The Computed eA1c (Estimated A1c) is a <i>calculated value</i> derived from your continuous/frequent glucose readings. It is <strong>NOT</strong> an actual laboratory Hemoglobin A1c (HbA1c) blood test results.
+                   </div>
                    
                    {!activePat || !stats ? (
                        <div style={{ padding: 40, textAlign: "center", color: "#64748b", border: "1px dashed #334155" }}>Insufficient dataset for analysis.</div>
@@ -666,7 +720,6 @@ export default function App() {
                                <div key={p.id} className="data-card pointer-card" onClick={() => setActivePat(p.id)} style={{ padding: 16, background: activePat === p.id ? "#06b6d420" : "#020617", border: `1px solid ${activePat === p.id ? "#06b6d4" : "#1e293b"}`, borderRadius: 8, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
                                    <div>
                                        <div style={{ fontSize: 16, fontWeight: 700, color: "#e2e8f0" }}>{p.name}</div>
-                                       <div style={{ fontSize: 10, color: "#64748b", fontFamily: "'JetBrains Mono',monospace", marginTop: 4 }}>Age: {p.age} | BMI: {p.bmi}</div>
                                    </div>
                                    <button onClick={(e) => { e.stopPropagation(); deletePat(p.id); }} style={{ color: "#ef4444", background: "none", border: "none", cursor: "pointer", fontSize: 20 }}>×</button>
                                </div>
@@ -675,11 +728,7 @@ export default function App() {
                            <hr style={{ border: 0, borderTop: "1px solid #1e293b", margin: "8px 0" }} />
                            <div style={lbl}>Add New User</div>
                            <input type="text" value={newName} onChange={e => setNewName(e.target.value)} placeholder="Full Name" style={inp} />
-                           <div className="grid-3" style={{ gap: 10 }}>
-                               <input type="number" value={newAge} onChange={e => setNewAge(e.target.value)} placeholder="Age" style={inp} />
-                               <input type="number" value={newWeight} onChange={e => setNewWeight(e.target.value)} placeholder="Weight (kg)" style={inp} />
-                               <input type="number" value={newHeight} onChange={e => setNewHeight(e.target.value)} placeholder="Height (cm)" style={inp} />
-                           </div>
+
                            <button onClick={addPatient} style={btn()}>Add User</button>
                        </div>
 
@@ -713,11 +762,14 @@ export default function App() {
          </div>
       </main>
 
-      {/* ══════ MODAL POPUP FOR SAVING READING ══════ */}
+      {/* ══════ MODAL POPUP FOR SCAN COMPLETION ══════ */}
       {pendingReading && (
         <div style={{ position: "fixed", top: 0, left: 0, width: "100%", height: "100%", background: "rgba(0,0,0,0.8)", zIndex: 100, display: "flex", alignItems: "center", justifyContent: "center", backdropFilter: "blur(4px)", opacity: 0, animation: "fadeIn .2s ease-out forwards" }}>
            <div className="scale-trans" style={{ background: "#0f172a", width: 420, maxWidth: "90%", padding: 24, borderRadius: 12, border: "1px solid #1e293b", boxShadow: "0 20px 40px rgba(0,0,0,0.5)" }}>
-              <h3 style={{ margin: "0 0 20px 0", fontSize: 20, fontWeight: 700, color: "#e2e8f0" }}>Log Reading</h3>
+              <h3 style={{ margin: "0 0 20px 0", fontSize: 20, fontWeight: 700, color: "#e2e8f0", display: "flex", justifyContent: "space-between" }}>
+                  Scan Complete!
+                  <span style={{ fontSize: 13, color: "#10b981", background: "#10b98120", padding: "4px 8px", borderRadius: 4, fontWeight: 600 }}>Cloud Synced ✓</span>
+              </h3>
               
               <div style={{ background: "#020617", padding: "30px", borderRadius: 8, display: "flex", alignItems: "baseline", justifyContent: "center", gap: 8, marginBottom: 24, border: "1px solid #10b98140", boxShadow: "inset 0 0 20px rgba(16,185,129,0.1)" }}>
                  <div style={{ fontSize: 48, fontFamily: "'JetBrains Mono',monospace", color: "#10b981", fontWeight: "bold", lineHeight: 1 }}>
@@ -730,8 +782,8 @@ export default function App() {
               <textarea value={notes} onChange={e => setNotes(e.target.value)} placeholder="How are you feeling?" rows={4} style={{ ...inp, resize: "none", fontFamily: "inherit", marginBottom: 24, fontSize: 14, padding: 12 }} />
               
               <div style={{ display: "flex", gap: 12 }}>
-                  <button onClick={saveReading} style={{ ...btn("#10b981"), flex: 1, padding: "14px", fontSize: 14 }}>Save to Dashboard</button>
-                  <button onClick={() => setPendingReading(null)} style={{ ...btnO("#64748b"), padding: "14px", fontSize: 14, color: "#94a3b8", borderColor: "#334155" }}>Discard</button>
+                  <button onClick={saveNotes} style={{ ...btn("#10b981"), flex: 1, padding: "14px", fontSize: 14 }}>Save Notes to Cloud</button>
+                  <button onClick={() => setPendingReading(null)} style={{ ...btnO("#64748b"), padding: "14px", fontSize: 14, color: "#94a3b8", borderColor: "#334155" }}>Dismiss</button>
               </div>
            </div>
         </div>

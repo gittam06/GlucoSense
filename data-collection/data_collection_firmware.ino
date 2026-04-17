@@ -31,7 +31,7 @@ void setup() {
   Serial.println("[BOOT] GlucoSense Data Collection Mode");
 
   if (!particleSensor.begin(Wire, I2C_SPEED_FAST)) {
-    Serial.println("[ERROR] MAX30105 not found! Check wiring.");
+    Serial.println("[ERROR] MAX30102 not found! Check wiring.");
     while (1) {
       digitalWrite(LED_PIN, !digitalRead(LED_PIN));
       delay(200);

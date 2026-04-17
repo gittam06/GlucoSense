@@ -35,9 +35,6 @@ wss.on('connection', function connection(ws) {
   ws.on('message', function message(data) {
     try {
       const msg = JSON.parse(data);
-      if (msg.type === "setContext") {
-        console.log(`\n[i] Received Patient Demographics: Age ${msg.age}, Gender ${msg.gender===1?'M':'F'}, BMI ${msg.bmi.toFixed(1)}`);
-      }
     } catch(e){}
   });
 

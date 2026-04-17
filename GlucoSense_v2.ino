@@ -28,6 +28,7 @@
 #include <WebServer.h>
 #include <WebSocketsServer.h>
 #include <ArduinoJson.h>
+#include <HTTPClient.h>
 #include "MAX30105.h"
 #include <TFT_eSPI.h>
 #include "GlucoseModel.h"
@@ -37,6 +38,9 @@ const char* WIFI_SSID     = "Choti-Advance";
 const char* WIFI_PASSWORD = "luCifer@78381";
 const char* AP_SSID       = "GlucoSense-ESP32";
 const char* AP_PASSWORD   = "glucose123";
+
+// -----------Firebase URL--------------------
+String firebaseUrl = "https://glucosense-36e64-default-rtdb.asia-southeast1.firebasedatabase.app/readings.json";
 
 // ─── Objects ───────────────────────────────────────
 MAX30105 particleSensor;
@@ -95,16 +99,11 @@ enum Page { PAGE_HOME, PAGE_HISTORY, PAGE_SETTINGS };
 Page currentPage = PAGE_HOME;
 bool needsRedraw = true;
 unsigned long lastTouchTime = 0;
+bool scanArmed = false;
 
 // ─── User Profile & Calibration ────────────────────
-float userAge      = 30.0;
-float userBMI      = 24.0;
-float userGender   = 1.0;
 bool  isCalibrated = false;
 float personalBias = 0.0;
-
-enum ModelType { MODEL_BASIC, MODEL_DEMOGRAPHIC };
-ModelType currentModel = MODEL_BASIC;
 
 // Heart rate smoothing
 float smoothedHR = 0;
@@ -286,9 +285,12 @@ void drawHomePage() {
   if (isScanning) {
     tft.setTextColor(CYAN, BG_COLOR);
     tft.drawString("Scanning...", SCR_W / 2, SCR_H - 52);
+  } else if (scanArmed) {
+    tft.setTextColor(ORANGE, BG_COLOR);
+    tft.drawString("Place finger on sensor", SCR_W / 2, SCR_H - 52);
   } else if (!latestReading.fingerDetected) {
     tft.setTextColor(TEXT_SECONDARY, BG_COLOR);
-    tft.drawString("Place finger on sensor", SCR_W / 2, SCR_H - 52);
+    tft.drawString("Press Start on Dashboard", SCR_W / 2, SCR_H - 52);
   } else {
     tft.setTextColor(GREEN, BG_COLOR);
     tft.drawString("Scan complete", SCR_W / 2, SCR_H - 52);
@@ -428,7 +430,6 @@ void drawSettingsPage() {
   } else {
     tft.drawString("Send 'calibrate <ref>' via Serial", 16, y + 28);
   }
-  tft.drawString("Age: " + String(userAge,0) + "  BMI: " + String(userBMI,1) + "  Sex: " + (userGender>0.5?"M":"F"), 16, y + 40);
 
   y += 63;
   drawRoundRect(8, y, SCR_W - 16, 55, CARD_COLOR, CARD_BORDER);
@@ -549,7 +550,7 @@ void setup() {
     JsonDocument doc;
     doc["device"] = deviceID;
     doc["sensor"] = "MAX30105";
-    doc["model"] = (currentModel == MODEL_BASIC) ? "Basic SVR" : "Demographic SVR";
+    doc["model"] = "Basic SVR";
     doc["calibrated"] = isCalibrated;
     doc["bias"] = personalBias;
     doc["uptime"] = millis() / 1000;
@@ -578,15 +579,13 @@ void setup() {
     else if (type == WStype_TEXT) {
       JsonDocument doc;
       DeserializationError err = deserializeJson(doc, payload);
-      if (!err) {
+      if (!err && doc.containsKey("type")) {
         const char* msgType = doc["type"];
-        if (strcmp(msgType, "setContext") == 0) {
-          if (doc.containsKey("age")) userAge = doc["age"];
-          if (doc.containsKey("gender")) userGender = doc["gender"];
-          if (doc.containsKey("bmi")) userBMI = doc["bmi"];
-          Serial.printf("[WS] Received context: Age=%.0f, Gender=%.0f, BMI=%.1f\n", userAge, userGender, userBMI);
-          currentModel = MODEL_DEMOGRAPHIC;
+        if (strcmp(msgType, "startScan") == 0) {
+          scanArmed = true;
+          memset(&latestReading, 0, sizeof(Reading));
           needsRedraw = true;
+          Serial.println("[WS] Scan armed by dashboard.");
         }
       }
     }
@@ -595,7 +594,7 @@ void setup() {
   Serial.println("[WS]   Server on port 81");
 
   Serial.println("\n>> System ready. Touch screen to navigate.");
-  Serial.println(">> Serial commands: set age/bmi/gender, calibrate <ref>, status, model basic/demo\n");
+  Serial.println(">> Serial commands: calibrate <ref>, status\n");
   delay(1500);
   needsRedraw = true;
 }
@@ -618,7 +617,7 @@ void loop() {
     }
   }
 
-  if (isFingerPresent()) {
+  if (scanArmed && isFingerPresent()) {
     if (!isScanning) {
       isScanning = true;
       latestReading.fingerDetected = true;
@@ -638,6 +637,7 @@ void loop() {
 
       if (latestReading.fingerDetected) {
         broadcastReading();
+        pushToFirebase();
         history[histIdx] = latestReading;
         histIdx = (histIdx + 1) % 10;
         if (histCount < 10) histCount++;
@@ -660,6 +660,7 @@ void loop() {
       }
 
       isScanning = false;
+      scanArmed = false;
       needsRedraw = true;
       delay(3000);
     }
@@ -735,16 +736,7 @@ void processAndPredict() {
     return;
   }
 
-  float rawGlucose;
-  #ifdef DEMOGRAPHIC_MODEL_AVAILABLE
-  if (currentModel == MODEL_DEMOGRAPHIC) {
-    rawGlucose = predictGlucoseSVR(ratio, variability, hr, userAge, userBMI, userGender);
-  } else {
-    rawGlucose = predictGlucoseSVR(ratio, variability);
-  }
-  #else
-  rawGlucose = predictGlucoseSVR(ratio, variability);
-  #endif
+  float rawGlucose = predictGlucoseSVR(ratio, variability);
 
   // --- PRESENTATION MODE FOR NEW USERS ---
   // 1. Map any wild SVR output (50-250) down into a safe, healthy human range (85-135)
@@ -791,6 +783,43 @@ void broadcastEvent(const char* evt, const char* msg) {
   doc["message"] = msg;
   String json; serializeJson(doc, json);
   wsServer.broadcastTXT(json);
+}
+
+void pushToFirebase() {
+  if (WiFi.status() == WL_CONNECTED) {
+    HTTPClient http;
+    http.begin(firebaseUrl);
+    http.addHeader("Content-Type", "application/json");
+
+    // Package the data for the cloud
+    JsonDocument doc;
+    doc["glucose"] = latestReading.glucose;
+    doc["heartRate"] = latestReading.heartRate;
+    doc["spO2"] = latestReading.spO2;
+    doc["ratio"] = latestReading.ratio;
+    doc["variability"] = latestReading.variability;
+    
+    // Tell Firebase to securely inject its exact server time automatically
+    JsonObject tsObj = doc["timestamp"].to<JsonObject>();
+    tsObj[".sv"] = "timestamp";
+
+    String jsonPayload;
+    serializeJson(doc, jsonPayload);
+
+    // Send it to Firebase!
+    int httpResponseCode = http.POST(jsonPayload);
+    
+    if (httpResponseCode > 0) {
+      Serial.print("[FIREBASE] Cloud Sync Success! Response code: ");
+      Serial.println(httpResponseCode);
+    } else {
+      Serial.print("[FIREBASE] Cloud Sync Error: ");
+      Serial.println(http.errorToString(httpResponseCode).c_str());
+    }
+    http.end();
+  } else {
+    Serial.println("[FIREBASE] Error: WiFi not connected.");
+  }
 }
 
 bool isFingerPresent() {
@@ -849,44 +878,20 @@ void handleSerialCommands() {
     cmd.trim();
     if (cmd.length() == 0) return;
 
-    if (cmd.startsWith("set age ")) {
-      userAge = cmd.substring(8).toFloat();
-      Serial.printf("User age set to %.0f\n", userAge);
-      needsRedraw = true;
-    }
-    else if (cmd.startsWith("set bmi ")) {
-      userBMI = cmd.substring(8).toFloat();
-      Serial.printf("User BMI set to %.1f\n", userBMI);
-      needsRedraw = true;
-    }
-    else if (cmd.startsWith("set gender ")) {
-      userGender = cmd.substring(11).toFloat();
-      Serial.printf("User gender set to %s\n", (userGender > 0.5) ? "Male" : "Female");
-      needsRedraw = true;
-    }
-    else if (cmd.startsWith("calibrate ")) {
+    if (cmd.startsWith("calibrate ")) {
       float ref = cmd.substring(10).toFloat();
       calibrateWithReference(ref);
     }
     else if (cmd == "status") {
       Serial.println("--- GlucoSense Status ---");
-      Serial.printf("Model: %s\n", (currentModel == MODEL_BASIC) ? "Basic" : "Demographic");
-      Serial.printf("Age: %.0f  BMI: %.1f  Gender: %s\n", userAge, userBMI, (userGender>0.5?"M":"F"));
+      Serial.printf("Model: Basic\n");
       Serial.printf("Calibrated: %s\n", isCalibrated ? "Yes" : "No");
       if (isCalibrated) Serial.printf("Bias: %.1f mg/dL\n", personalBias);
       Serial.printf("Last Glucose: %.1f mg/dL\n", latestReading.glucose);
       Serial.printf("WiFi IP: %s\n", ipAddress.c_str());
     }
-    else if (cmd == "model basic") {
-      currentModel = MODEL_BASIC;
-      Serial.println("Switched to basic model (ratio + variability)");
-    }
-    else if (cmd == "model demo") {
-      currentModel = MODEL_DEMOGRAPHIC;
-      Serial.println("Switched to demographic model (requires 6-parameter predict function)");
-    }
     else {
-      Serial.println("Unknown command. Available: set age/bmi/gender, calibrate <ref>, status, model basic/demo");
+      Serial.println("Unknown command. Available: calibrate <ref>, status");
     }
   }
 }
