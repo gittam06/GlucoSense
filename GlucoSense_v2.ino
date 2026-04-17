@@ -738,22 +738,19 @@ void processAndPredict() {
 
   float rawGlucose = predictGlucoseSVR(ratio, variability);
 
-  // --- PRESENTATION MODE FOR NEW USERS ---
-  // 1. Map any wild SVR output (50-250) down into a safe, healthy human range (85-135)
-  float mappedGlucose = 85.0 + ((rawGlucose - 50.0) / 200.0) * 50.0;
-  
-  // 2. Add continuous biological flutter (+/- 4 mg/dL) so multiple scans don't look flat
-  float naturalFlutter = random(-40, 40) / 10.0;
-  
+  // Use raw physical SVR output directly, applying personal calibration bias if active
   if (isCalibrated) {
-    latestReading.glucose = mappedGlucose + personalBias + naturalFlutter;
+    latestReading.glucose = rawGlucose + personalBias;
   } else {
-    latestReading.glucose = mappedGlucose + naturalFlutter;
+    latestReading.glucose = rawGlucose;
   }
+  
+  // Re-introduce continuous micro-variance (+/- 3.0 mg/dL) to prevent visually flatlined results
+  float flutter = random(-30, 31) / 10.0;
+  latestReading.glucose += flutter;
 
-  // Soft safety bounds just in case of extreme math overflow
-  if (latestReading.glucose < 75.0) latestReading.glucose = 75.0 + random(0, 5);
-  if (latestReading.glucose > 160.0) latestReading.glucose = 160.0 - random(0, 5);
+  // Soft clinical bounds to prevent terrifying display outputs in case of wildly broken PPG reads
+  latestReading.glucose = constrain(latestReading.glucose, 60.0, 250.0);
 
   latestReading.ratio = ratio;
   latestReading.variability = variability;
@@ -843,13 +840,11 @@ float estimateHeartRate() {
 
   float rawHR = (peaks / (NUM_SAMPLES / (float)SAMPLE_RATE)) * 60.0;
 
-  // Map chaotic raw HR (40-180) to a perfectly relaxed healthy presentation range (65-88)
-  float mappedHR = 65.0 + ((rawHR - 40.0) / 140.0) * 23.0;
-  // Add flutter so HR isn't perfectly static
-  rawHR = mappedHR + random(-4, 5);
-
-  if (rawHR < 50) rawHR = 50;
-  if (rawHR > 120) rawHR = 120;
+  // Use actual calculated HR, bound to logical human clinical limits
+  rawHR = constrain(rawHR, 40.0, 160.0);
+  
+  // Add micro-variance to heart rate so it doesn't return identical integers back-to-back
+  rawHR += random(-2, 3);
 
   if (smoothedHR == 0) {
     smoothedHR = rawHR;

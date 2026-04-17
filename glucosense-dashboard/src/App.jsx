@@ -1,5 +1,5 @@
 import { db } from './firebase';
-import { ref, onValue, update } from "firebase/database";
+import { ref, onValue, update, remove } from "firebase/database";
 import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 
 const MAX_HISTORY = 30;
@@ -311,9 +311,8 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    if (!activePat) { setSavedReadings([]); return; }
+    if (!activePat) return;
     localStorage.setItem("gs_ap", activePat);
-    (async () => { const r = await dbIdx("readings", "patientId", activePat); setSavedReadings(r.sort((a, b) => a.timestamp - b.timestamp)); })();
     
     // Clear live scan state when switching patients
     setPendingReading(null); setScanning(false); setEv(""); setLiveReadings([]);
@@ -366,8 +365,14 @@ export default function App() {
 
   const deletePat = async (id) => {
     if (!confirm("Delete patient profile and all readings?")) return;
-    await dbDel("patients", id); const r = await dbIdx("readings", "patientId", id);
-    for (const x of r) await dbDel("readings", x.id);
+    await dbDel("patients", id); 
+    
+    // Delete their readings from Firebase
+    const patReadings = savedReadings.filter(r => r.patientId === id);
+    for (const x of patReadings) {
+        if (x.id) await remove(ref(db, `readings/${x.id}`));
+    }
+    
     setPatients(prev => prev.filter(p => p.id !== id));
     if (activePat === id) { const rem = patients.filter(p => p.id !== id); setActivePat(rem.length ? rem[0].id : null); }
   };
@@ -410,14 +415,17 @@ export default function App() {
     }
   };
 
-  const delReading = async (id) => { await dbDel("readings", id); setSavedReadings(prev => prev.filter(r => r.id !== id)); };
+  const delReading = async (id) => { 
+      if (id) await remove(ref(db, `readings/${id}`)); 
+  };
 
   const filtered = useMemo(() => {
     let r = savedReadings;
+    if (activePat) r = r.filter(x => x.patientId === activePat);
     if (dateFrom) { const ts = new Date(dateFrom).setHours(0, 0, 0, 0); r = r.filter(x => x.timestamp >= ts); }
     if (dateTo) { const ts = new Date(dateTo).setHours(23, 59, 59, 999); r = r.filter(x => x.timestamp <= ts); }
     return r;
-  }, [savedReadings, dateFrom, dateTo]);
+  }, [savedReadings, activePat, dateFrom, dateTo]);
 
   const stats = useMemo(() => {
     if (!filtered.length) return null;
@@ -552,11 +560,11 @@ export default function App() {
                                       <span>Recent Scans</span>
                                       <span style={{ cursor: "pointer", color: "#06b6d4", textTransform: "none" }} onClick={() => setPage("history")}>View all history →</span>
                                   </div>
-                                  {!savedReadings.length ? (
+                                  {!filtered.length ? (
                                       <div style={{ height: 250, display: "flex", alignItems: "center", justifyContent: "center", color: "#334155", fontSize: 13, border: "1px dashed #1e293b", borderRadius: 8 }}>No scans yet...</div>
                                   ) : (
                                       <div style={{ display: "flex", flexDirection: "column", gap: 10, height: 250, overflowY: "auto", paddingRight: 4 }}>
-                                          {[...savedReadings].reverse().slice(0, 4).map(r => {
+                                          {filtered.slice(0, 4).map(r => {
                                               const z = glucoseZone(r.glucose);
                                               return (
                                                   <div key={r.id} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "12px 16px", background: "#020617", borderRadius: 8, borderLeft: `3px solid ${z.color}` }}>
